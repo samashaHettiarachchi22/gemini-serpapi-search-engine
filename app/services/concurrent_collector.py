@@ -205,7 +205,7 @@ Respond in JSON format:
         Returns list of {url, sentiment, readability}
         """
         ai_overview = features.get('ai_overview', {})
-        sources = ai_overview.get('sources', [])
+        sources = ai_overview.get('sources', []) or []  # Handle None
         
         if not sources:
             return []
@@ -387,7 +387,7 @@ Respond in JSON format:
         # AI Overview analysis
         ai_overview = features.get('ai_overview', {})
         ai_text = ai_overview.get('overview', '')
-        sources = ai_overview.get('sources', [])
+        sources = ai_overview.get('sources', []) or []  # Handle None
         
         brand_mentioned = any(
             brand.lower() in ai_text.lower()
@@ -402,7 +402,7 @@ Respond in JSON format:
         )
         
         # Organic results analysis
-        organic_results = features.get('organic_results', [])
+        organic_results = features.get('organic_results', []) or []  # Handle None
         total_organic = len(organic_results)
         brand_organic = sum(
             1 for result in organic_results
@@ -436,7 +436,7 @@ Respond in JSON format:
             'has_featured_snippet': has_fs,
             'has_related_questions': has_rq,
             'brand_mentioned': brand_mentioned,
-            'ai_overview_text': ai_text[:1000] if ai_text else None,  # Limit size
+            'ai_overview_text': ai_text if ai_text else None,  # Full text
             'total_citations': total_citations,
             'brand_citations': brand_citations,
             'total_organic_results': total_organic,
@@ -452,7 +452,7 @@ Respond in JSON format:
                                citation_sentiment: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Prepare citation data for batch insert"""
         ai_overview = features.get('ai_overview', {})
-        sources = ai_overview.get('sources', [])
+        sources = ai_overview.get('sources', []) or []  # Handle None
         
         citations_data = []
         
@@ -494,7 +494,7 @@ Respond in JSON format:
                                features: Dict[str, Any],
                                brand_domains: List[str]) -> List[Dict[str, Any]]:
         """Prepare organic positions data for batch insert"""
-        organic_results = features.get('organic_results', [])
+        organic_results = features.get('organic_results', []) or []  # Handle None
         positions_data = []
         
         for idx, result in enumerate(organic_results[:10], 1):
