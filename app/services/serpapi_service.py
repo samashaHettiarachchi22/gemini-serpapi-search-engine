@@ -19,7 +19,8 @@ class SerpApiService:
         query: str, 
         gl: str = "us", 
         hl: str = "en", 
-        google_domain: str = "google.com"
+        google_domain: str = "google.com",
+        log_to_db: bool = True
     ) -> Dict[str, Any]:
         """
         Fetch Google search results from SerpApi
@@ -29,6 +30,7 @@ class SerpApiService:
             gl: Country code (e.g., 'us', 'lk', 'uk')
             hl: Language code (e.g., 'en', 'es')
             google_domain: Google domain to search (e.g., 'google.com', 'google.lk')
+            log_to_db: Whether to log to database (default: True)
         
         Returns:
             Dict containing full SerpApi response
@@ -37,6 +39,7 @@ class SerpApiService:
             RuntimeError: If API key is not configured
             requests.RequestException: If API request fails
         """
+        import time
         if not self.api_key:
             raise RuntimeError("SerpApi API key not configured")
         
@@ -49,9 +52,41 @@ class SerpApiService:
             "api_key": self.api_key,
         }
         
+        start_time = time.time()
         response = requests.get(self.endpoint, params=params, timeout=60)
         response.raise_for_status()
-        return response.json()
+        response_time_ms = int((time.time() - start_time) * 1000)
+        
+        result = response.json()
+        
+        # Log to database for tracking
+        if log_to_db:
+            try:
+                from app.models.optimized_tracking import search_tracking_db_optimized
+                
+                # SerpAPI has flat pricing per request
+                serpapi_cost_per_call = 0.002  # $0.002 per search
+                
+                response_summary = f"Results: {len(result.get('organic_results', []))} organic, " \
+                                 f"AI Overview: {bool(result.get('ai_overview'))}"
+                
+                print(f"🔵 Attempting to log SerpAPI call to database...")
+                log_id = search_tracking_db_optimized.log_api_call(
+                    service='serpapi',
+                    prompt=query,
+                    model='google_search',
+                    response=response_summary,
+                    response_time_ms=response_time_ms,
+                    success=True,
+                    estimated_cost=serpapi_cost_per_call
+                )
+                print(f"✅ Database log saved successfully (ID: {log_id})")
+            except Exception as db_err:
+                import traceback
+                print(f"❌ Database logging failed for SerpAPI: {db_err}")
+                print(f"📋 Full error:\n{traceback.format_exc()}")
+        
+        return result
     
     def extract_answer_box(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
