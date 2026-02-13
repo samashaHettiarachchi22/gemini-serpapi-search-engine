@@ -60,6 +60,9 @@ class SearchSnapshot(Base):
     # ===== METADATA =====
     processing_time_ms = Column(Integer)  # How long it took to process
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Category to indicate source/type (e.g. 'gemini-only', 'serp', 'test')
+    category = Column(String(50), nullable=True)
     
     # Relationships
     citations = relationship("CitationSource", back_populates="snapshot", cascade="all, delete-orphan")
@@ -180,6 +183,50 @@ class ExecutionLog(Base):
     )
 
 
+class APICallLog(Base):
+    """
+    UNIFIED: Track all AI API calls (Claude, Gemini, etc.)
+    Single table for all services
+    """
+    __tablename__ = 'api_call_logs'
+    
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Service identification
+    service = Column(String(50), nullable=False, index=True)  # 'claude', 'gemini', 'openai'
+    model = Column(String(100))
+    
+    # Request data
+    prompt = Column(Text, nullable=False)
+    max_tokens = Column(Integer, nullable=True)
+    
+    # Response data
+    response = Column(Text)
+    response_time_ms = Column(Integer)
+    
+    # Token tracking
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    
+    # Cost tracking
+    estimated_cost = Column(Float, nullable=True)
+    
+    # Status tracking
+    success = Column(Boolean, default=True, index=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Metadata
+    user_ip = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_api_service_timestamp', 'service', 'timestamp'),
+        Index('idx_api_success', 'success'),
+    )
+
+
 class SearchTrackingDB:
     """
     OPTIMIZED Database Handler
@@ -280,6 +327,230 @@ class SearchTrackingDB:
                 .filter(SearchSnapshot.timestamp >= cutoff_date)\
                 .order_by(SearchSnapshot.timestamp.desc())\
                 .all()
+        finally:
+            session.close()
+    
+    def log_api_call(self,
+                    service: str,
+                    prompt: str,
+                    model: str,
+                    response: Optional[str],
+                    response_time_ms: int,
+                    success: bool = True,
+                    error_message: Optional[str] = None,
+                    max_tokens: Optional[int] = None,
+                    input_tokens: Optional[int] = None,
+                    output_tokens: Optional[int] = None,
+                    total_tokens: Optional[int] = None,
+                    estimated_cost: Optional[float] = None,
+                    user_ip: Optional[str] = None) -> int:
+        """
+        Log any AI API call to unified table
+        
+        Args:
+            service: Service name ('claude', 'gemini', etc.)
+            prompt: User's prompt
+            model: Model used
+            response: AI response text (None if error)
+            response_time_ms: Response time in milliseconds
+            success: Whether call was successful
+            error_message: Error message if failed
+            max_tokens: Max tokens setting
+            input_tokens: Number of input tokens used
+            output_tokens: Number of output tokens used
+            total_tokens: Total tokens used
+            estimated_cost: Estimated cost in USD
+            user_ip: User's IP address (optional)
+            
+        Returns:
+            log_id: ID of the log entry
+        """
+        session = self.SessionLocal()
+        
+        try:
+            log = APICallLog(
+                service=service,
+                prompt=prompt,
+                model=model,
+                max_tokens=max_tokens,
+                response=response,
+                response_time_ms=response_time_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                estimated_cost=estimated_cost,
+                success=success,
+                error_message=error_message,
+                user_ip=user_ip
+            )
+            session.add(log)
+            session.commit()
+            
+            return log.id
+            
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+    
+    def get_api_stats(self, service: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
+        """
+        Get API usage statistics for any service FROM DATABASE
+        
+        Args:
+            service: Filter by service ('claude', 'gemini', etc.) - None for all
+            days: Number of days to look back
+            
+        Returns:
+            Dictionary with stats from DATABASE (persistent)
+        """
+        session = self.SessionLocal()
+        
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            
+            query = session.query(APICallLog)\
+                .filter(APICallLog.timestamp >= cutoff_date)
+            
+            if service:
+                query = query.filter(APICallLog.service == service)
+            
+            logs = query.all()
+            
+            if not logs:
+                return {
+                    "service": service or "all",
+                    "total_calls": 0,
+                    "successful_calls": 0,
+                    "failed_calls": 0,
+                    "success_rate": 0.0,
+                    "avg_response_time_ms": 0,
+                    "period_days": days,
+                    "source": "database"
+                }
+            
+            total = len(logs)
+            successful = sum(1 for log in logs if log.success)
+            failed = total - successful
+            avg_time = sum(log.response_time_ms for log in logs if log.response_time_ms) / total if total > 0 else 0
+            
+            return {
+                "service": service or "all",
+                "total_calls": total,
+                "successful_calls": successful,
+                "failed_calls": failed,
+                "success_rate": round((successful / total * 100) if total > 0 else 0.0, 2),
+                "avg_response_time_ms": int(avg_time),
+                "period_days": days,
+                "source": "database"
+            }
+            
+        finally:
+            session.close()
+    
+    def get_api_cost_analysis(self, service: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
+        """
+        Calculate costs from database logs (more accurate than in-memory)
+        
+        Args:
+            service: Service to analyze
+            days: Days to look back
+            
+        Returns:
+            Cost analysis with token estimates
+        """
+        session = self.SessionLocal()
+        
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            
+            query = session.query(APICallLog)\
+                .filter(APICallLog.timestamp >= cutoff_date)\
+                .filter(APICallLog.success == True)
+            
+            if service:
+                query = query.filter(APICallLog.service == service)
+            
+            logs = query.all()
+            
+            # Token estimation fallback (4 chars = 1 token)
+            def estimate_tokens(text):
+                return len(text or "") // 4
+            
+            # Cost per 1k tokens
+            cost_per_1k = {
+                'gemini': 0.0001,
+                'claude': 0.0003,
+                'serpapi': 0.002
+            }
+            
+            total_cost = 0
+            total_tokens = 0
+            breakdown = {}
+            actual_token_count = 0
+            estimated_token_count = 0
+            
+            for log in logs:
+                svc = log.service
+                
+                # Use stored token data if available (100% accurate for Claude)
+                # Otherwise estimate from text (for older/legacy records)
+                if log.total_tokens and log.total_tokens > 0:
+                    tokens = log.total_tokens
+                    actual_token_count += 1
+                else:
+                    # Fallback to estimation
+                    input_tokens = estimate_tokens(log.prompt)
+                    output_tokens = estimate_tokens(log.response)
+                    tokens = input_tokens + output_tokens
+                    estimated_token_count += 1
+                
+                # Use stored cost if available, otherwise calculate
+                if log.estimated_cost and log.estimated_cost > 0:
+                    cost = log.estimated_cost
+                else:
+                    cost = (tokens / 1000) * cost_per_1k.get(svc, 0)
+                
+                total_tokens += tokens
+                total_cost += cost
+                
+                if svc not in breakdown:
+                    breakdown[svc] = {'calls': 0, 'tokens': 0, 'cost': 0, 'actual_tokens': 0, 'estimated_tokens': 0}
+                
+                breakdown[svc]['calls'] += 1
+                breakdown[svc]['tokens'] += tokens
+                breakdown[svc]['cost'] += cost
+                if log.total_tokens and log.total_tokens > 0:
+                    breakdown[svc]['actual_tokens'] += 1
+                else:
+                    breakdown[svc]['estimated_tokens'] += 1
+            
+            # Format breakdown
+            for svc in breakdown:
+                breakdown[svc]['cost'] = round(breakdown[svc]['cost'], 4)
+            
+            daily_avg_cost = total_cost / days if days > 0 else 0
+            
+            accuracy_pct = (actual_token_count / len(logs) * 100) if logs else 0
+            
+            return {
+                "period_days": days,
+                "total_calls": len(logs),
+                "total_tokens": total_tokens,
+                "total_cost_usd": round(total_cost, 4),
+                "avg_cost_per_call": round(total_cost / len(logs), 6) if logs else 0,
+                "breakdown": breakdown,
+                "estimated_monthly_cost": round(daily_avg_cost * 30, 2),
+                "accuracy": {
+                    "actual_token_data": actual_token_count,
+                    "estimated_token_data": estimated_token_count,
+                    "accuracy_percentage": round(accuracy_pct, 1),
+                    "note": "Claude returns 100% accurate tokens, Gemini uses estimation"
+                },
+                "source": "database"
+            }
+            
         finally:
             session.close()
 
